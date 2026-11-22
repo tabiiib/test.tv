@@ -770,8 +770,12 @@
 
   <script>
     (function () {
-      var DEFAULT_M3U_URL = "https://raw.githubusercontent.com/saeidrahmanbd/BDIX-IPTV/main/IPTV-Playlist.m3u";
+      var PRECOMPILED_JSON_URL = "https://cdn.jsdelivr.net/gh/saeidrahmanbd/BDIX-IPTV@main/data/channels.min.json";
+      var EPG_NOW_JSON_URL = "https://cdn.jsdelivr.net/gh/saeidrahmanbd/BDIX-IPTV@main/data/epg-now.json";
+      var DEFAULT_M3U_URL = "https://cdn.jsdelivr.net/gh/saeidrahmanbd/BDIX-IPTV@main/data/clean-playlist.m3u";
+      var RAW_FALLBACK_M3U_URL = "https://raw.githubusercontent.com/saeidrahmanbd/BDIX-IPTV/main/IPTV-Playlist.m3u";
       var ACTIVE_M3U_URL = DEFAULT_M3U_URL;
+      var epgMap = {};
       try {
         var qs = window.location.search || "";
         var m3uParamMatch = qs.match(/[?&]m3u=([^&]+)/i);
@@ -2420,7 +2424,9 @@
         currentLogo.src = channel.logo;
         currentLogo.onerror = function () { currentLogo.onerror = null; currentLogo.src = FALLBACK_LOGO; };
         currentTitle.textContent = "#" + channel.num + "  " + channel.name;
-        currentCategory.textContent = isOnDemandHttp ? (channel.group + " • HTTP Proxy") : channel.group;
+        var nowProg = getCurrentEpgProgramme(channel.name);
+        var baseSub = isOnDemandHttp ? (channel.group + " • HTTP Proxy") : channel.group;
+        currentCategory.textContent = nowProg ? (baseSub + "  |  Now: " + nowProg) : baseSub;
 
         updateActiveCardHighlight();
 
@@ -3162,7 +3168,108 @@
         }
       }
 
-      loadM3UPlaylist(ACTIVE_M3U_URL);
+      function getCurrentEpgProgramme(channelName) {
+        var list = epgMap && epgMap[channelName];
+        if (!list || !list.length) return "";
+        var nowSec = Math.floor(Date.now() / 1000);
+        for (var i = 0; i < list.length; i++) {
+          if (list[i].start <= nowSec && list[i].stop >= nowSec) {
+            return list[i].title || "";
+          }
+        }
+        return list[0].title || "";
+      }
+
+      function loadSlimEpg() {
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", EPG_NOW_JSON_URL, true);
+        xhr.timeout = 6000;
+        xhr.onreadystatechange = function () {
+          if (xhr.readyState === 4 && xhr.status >= 200 && xhr.status < 300 && xhr.responseText) {
+            try {
+              var parsed = JSON.parse(xhr.responseText);
+              if (parsed && parsed.programmes) {
+                epgMap = parsed.programmes;
+                if (activeChannelObj) {
+                  var prog = getCurrentEpgProgramme(activeChannelObj.name);
+                  if (prog && currentCategory.textContent.indexOf("Now:") === -1) {
+                    currentCategory.textContent = currentCategory.textContent + "  |  Now: " + prog;
+                  }
+                }
+              }
+            } catch (e) {}
+          }
+        };
+        try { xhr.send(); } catch (e) {}
+      }
+
+      function bootFromPrecompiledJsonOrM3u() {
+        var customM3u = (ACTIVE_M3U_URL !== DEFAULT_M3U_URL);
+        if (customM3u) {
+          loadM3UPlaylist(ACTIVE_M3U_URL);
+          return;
+        }
+        setStatus("Loading Channels...", "warn");
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", PRECOMPILED_JSON_URL, true);
+        xhr.timeout = 5000;
+        xhr.onreadystatechange = function () {
+          if (xhr.readyState === 4) {
+            if (xhr.status >= 200 && xhr.status < 300 && xhr.responseText) {
+              try {
+                var precompiled = JSON.parse(xhr.responseText);
+                if (Object.prototype.toString.call(precompiled) === "[object Array]" && precompiled.length > 0) {
+                  channels = precompiled;
+                  activeCategory = NEWS_TAB_NAME;
+                  buildCategoryTabs();
+                  renderChannels();
+                  initializeStartupPlayback();
+                  loadSlimEpg();
+                  return;
+                }
+              } catch (e) {}
+            }
+            // Fallback to clean M3U -> raw GitHub M3U
+            loadM3UPlaylistWithFallback(DEFAULT_M3U_URL, RAW_FALLBACK_M3U_URL);
+            loadSlimEpg();
+          }
+        };
+        xhr.onerror = function () {
+          loadM3UPlaylistWithFallback(DEFAULT_M3U_URL, RAW_FALLBACK_M3U_URL);
+          loadSlimEpg();
+        };
+        xhr.ontimeout = function () {
+          loadM3UPlaylistWithFallback(DEFAULT_M3U_URL, RAW_FALLBACK_M3U_URL);
+          loadSlimEpg();
+        };
+        try { xhr.send(); } catch (e) {
+          loadM3UPlaylistWithFallback(DEFAULT_M3U_URL, RAW_FALLBACK_M3U_URL);
+        }
+      }
+
+      function loadM3UPlaylistWithFallback(primaryUrl, backupUrl) {
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", primaryUrl, true);
+        xhr.timeout = 6000;
+        xhr.onreadystatechange = function () {
+          if (xhr.readyState === 4) {
+            if (xhr.status >= 200 && xhr.status < 300 && xhr.responseText && xhr.responseText.indexOf("#EXTINF") !== -1) {
+              var parsed = parseM3U(xhr.responseText);
+              if (parsed.length > 0) {
+                savePlaylistCache(primaryUrl, xhr.responseText);
+                applyParsedPlaylist(parsed, true);
+                return;
+              }
+            }
+            loadM3UPlaylist(backupUrl);
+          }
+        };
+        xhr.onerror = function () { loadM3UPlaylist(backupUrl); };
+        xhr.ontimeout = function () { loadM3UPlaylist(backupUrl); };
+        try { xhr.send(); } catch (e) { loadM3UPlaylist(backupUrl); }
+      }
+
+      bootFromPrecompiledJsonOrM3u();
     })();
   </script>
 </body>
