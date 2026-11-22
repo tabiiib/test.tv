@@ -1124,10 +1124,11 @@
         ["mahuaa bangla", "mahua bangla"]
       ];
 
-      /* Curated 40 Hindi Movies Channels (strictly matched in order) */
+      /* Curated Hindi Movies Channels (strictly matched in order) */
       var HINDI_MOVIES_SLOTS = [
         ["star gold"],
         ["sony max"],
+        ["sony movies"],
         ["zee cinema"],
         ["&pictures", "and pictures", "pictures"],
         ["colors cineplex"],
@@ -1151,10 +1152,20 @@
         ["b4u kadak"],
         ["dhamaka movies b4u", "dhamaka movies"],
         ["goldmines"],
+        ["goldmines 2"],
+        ["goldmines action"],
         ["goldmines bollywood"],
         ["goldmines movies"],
+        ["goldmines movies 2", "goldmines movies"],
         ["all time movies"],
         ["shemaroo josh"],
+        ["bollygold", "nh bollygold"],
+        ["nh bollyflix", "bollyflix"],
+        ["bollywood old"],
+        ["hindi movie classic", "hindi classic 24", "hindi movie classic 24"],
+        ["chhaya chitram"],
+        ["india talkies"],
+        ["the movie club", "movie club"],
         ["manoranjan tv"],
         ["manoranjan prime"],
         ["housefull movies"],
@@ -2956,8 +2967,10 @@
             if (keywords[0] === "anmol cinema" && meta[i].norm.indexOf(" 2 ") !== -1) {
               continue;
             }
-            // Prevent base "Goldmines" from matching Goldmines Bollywood / Goldmines Movies
+            // Prevent base "Goldmines" from matching Goldmines 2 / Action / Bollywood / Movies
             if (keywords[0] === "goldmines" && (
+              meta[i].norm.indexOf(" 2 ") !== -1 ||
+              meta[i].norm.indexOf(" action ") !== -1 ||
               meta[i].norm.indexOf(" bollywood ") !== -1 ||
               meta[i].norm.indexOf(" movies ") !== -1
             )) {
