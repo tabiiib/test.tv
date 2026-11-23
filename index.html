@@ -20,7 +20,7 @@
   <link rel="dns-prefetch" href="//byphdgllyk.gpcdn.net" />
   <title>IPTV - TABIB</title>
   <!-- Hls.js v0.14.17: 100% compatible with 2019 LG webOS 4.5 (Chromium 53) AND iPhone 15 Safari -->
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@0.14.17/dist/hls.min.js" integrity="sha384-lZgSGurOqpGQxROgzXskCX/jiCNuL3hbgHuTuVOpzAdMhgcutK+rSq+25KsFqNlz" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@0.14.17/dist/hls.min.js"></script>
   <style>
     * {
       box-sizing: border-box;
@@ -1252,8 +1252,8 @@
       }
 
       function isUnreliableVariant(ch, normName) {
-        var combined = normName + normalizeChannelTitle(ch && ch.group) + normalizeChannelTitle(ch && ch.url);
-        return / (?:review|backup|bkp|bak|mirror|test|demo|offline|broken|server|alt|link)[0-9]* /.test(combined);
+        var combined = normName + normalizeChannelTitle(ch && ch.group);
+        return / (?:review|backup|bkp|bak|mirror|test|demo|offline|broken|alt)[0-9]* /.test(combined);
       }
 
       function matchesSlotKeywords(normName, keywords) {
@@ -1696,10 +1696,11 @@
         return String(rawUrl || "").toLowerCase().indexOf("http://") === 0;
       }
 
-      function getPlayableUrl(rawUrl, forceManifestProxy, allowHttpProxy) {
+      function getPlayableUrl(rawUrl, forceManifestProxy, allowHttpProxy, proxySegments) {
         if (forceManifestProxy) {
           var httpFlag = allowHttpProxy ? "&allowHttp=1" : "";
-          return "/api/proxy?mode=manifest" + httpFlag + "&url=" + encodeURIComponent(rawUrl);
+          var segFlag = proxySegments ? "&proxySeg=1" : "";
+          return "/api/proxy?mode=manifest" + httpFlag + segFlag + "&url=" + encodeURIComponent(rawUrl);
         }
         return rawUrl;
       }
@@ -1865,14 +1866,14 @@
           return stages;
         }
 
-        // Anti-Buffer Auto-Fallback Pipeline:
-        // 1. HW Native (Direct - zero CPU, smooth 60fps when CDN is fast)
-        // 2. ABR Auto (MSE Direct with 30s-60s deep buffer & fast-start level 0)
-        // 3. 720p Cap (MSE Direct - eliminates 1080p bandwidth spikes)
-        // 4. 480p Smooth Cap (MSE Direct - rock-solid on slower/congested links)
-        // 5. ABR Auto (M3U8 Manifest Proxy)
-        // 6. HW Native (M3U8 Manifest Proxy)
-        // 7. 480p Smooth Cap (M3U8 Manifest Proxy)
+        // Zero-Vercel-Bandwidth First Pipeline:
+        // 1. HW Native (Direct - zero CORS issues & 0 bytes on Vercel)
+        // 2. ABR Auto (MSE Direct - 0 bytes on Vercel)
+        // 3. 720p Cap (MSE Direct - 0 bytes on Vercel)
+        // 4. 480p Smooth Cap (MSE Direct - 0 bytes on Vercel)
+        // 5. ABR Auto (Tiny ~2KB M3U8 Manifest Proxy only - segments stay direct)
+        // 6. HW Native (Tiny ~2KB M3U8 Manifest Proxy only)
+        // 7. Last-Resort CORS/HTTP Segment Relay (480p capped, strictly guarded by 5GB monthly budget)
         if (supportsNativeHls) {
           stages.push({ key: "hw-direct", type: "hw", proxy: false, allowHttp: false, label: "HW Native" });
         }
@@ -1887,6 +1888,9 @@
         }
         if (hasMse) {
           stages.push({ key: "cap-480-proxy", type: "mse", proxy: true, allowHttp: false, cap: 480, label: "480p Proxy" });
+          if (!isHttpProxyCapReached()) {
+            stages.push({ key: "cors-seg-480", type: "mse", proxy: true, allowHttp: false, proxySegments: true, cap: 480, label: "Relay 480p" });
+          }
         }
 
         // Prioritize the last smooth winning mode for this channel
@@ -1953,12 +1957,13 @@
         }
         currentFallbackStage = nextStageIdx;
         var stage = stages[nextStageIdx];
-        var streamUrl = getPlayableUrl(channel.url, stage.proxy, !!stage.allowHttp);
+        var useSegRelay = !!stage.proxySegments;
+        var streamUrl = getPlayableUrl(channel.url, stage.proxy, !!stage.allowHttp, useSegRelay);
 
         if (stage.type === "hw") {
           startHardwarePlayback(streamUrl, channel, stage.proxy, 0, true, nextStageIdx, stage.key);
         } else {
-          startMseFallbackPlayback(streamUrl, channel, stage.proxy, -1, stage.cap, true, nextStageIdx, stage.key);
+          startMseFallbackPlayback(streamUrl, channel, stage.proxy, -1, stage.cap, true, nextStageIdx, stage.key, useSegRelay);
         }
       }
 
@@ -2125,7 +2130,7 @@
       }
 
       /* Deep-Buffered Anti-Buffer MSE Playback */
-      function startMseFallbackPlayback(streamUrl, channel, isRetry, forcedLevel, capMaxHeight, isAutoChain, stageIdx, stageKey) {
+      function startMseFallbackPlayback(streamUrl, channel, isRetry, forcedLevel, capMaxHeight, isAutoChain, stageIdx, stageKey, allowSegRelay) {
         teardownPlayer();
         clearFallbackTimer();
         currentEngineMode = "mse";
@@ -2133,6 +2138,7 @@
         var myStage = typeof stageIdx === "number" ? stageIdx : 0;
         var myStageKey = stageKey || (capMaxHeight === 720 ? "cap-720" : (capMaxHeight === 480 ? "cap-480" : "mse-auto"));
         var mseStallEpisodes = 0;
+        var isSegRelayActive = !!allowSegRelay;
 
         if (typeof Hls === "undefined" || !Hls.isSupported()) {
           if (inChain) {
@@ -2155,7 +2161,7 @@
             if (!mseBooted && activeChannelObj && activeChannelUrl === channel.url) {
               advanceAutoFallback(channel, myStage + 1);
             }
-          }, 5000);
+          }, 6500);
         }
 
         var baseOriginDir = channel.url.substring(0, channel.url.lastIndexOf("/") + 1);
@@ -2197,8 +2203,8 @@
             var isOnDemandHttp = (window.location.protocol === "https:" && isHttpOnlyStream(channel.url));
             var isSegment = (low.indexOf(".ts") !== -1 || low.indexOf(".m4s") !== -1 || low.indexOf(".mp4") !== -1 || low.indexOf(".aac") !== -1);
 
-            // For normal HTTPS streams, NEVER allow heavy video chunks to pass through Vercel /api/proxy
-            if (!isOnDemandHttp && isSegment && low.indexOf("/api/proxy") !== -1) {
+            // Keep heavy video chunks 100% direct on CDN unless explicitly in last-resort relay or HTTP mode
+            if (!isOnDemandHttp && !isSegRelayActive && isSegment && low.indexOf("/api/proxy") !== -1) {
               var directSegUrl = reqUrl;
               var qIdx = reqUrl.indexOf("url=");
               if (qIdx !== -1) {
@@ -2220,8 +2226,8 @@
             var loaded = data.stats.loaded || 0;
             var tMs = (data.stats.tload && data.stats.trequest) ? (data.stats.tload - data.stats.trequest) : 0;
             var inst = (loaded > 0 && tMs > 5) ? ((loaded * 8) / ((tMs / 1000) * 1000000)) : 0;
-            var isProxiedHttp = (window.location.protocol === "https:" && isHttpOnlyStream(channel.url));
-            recordDownloadedBytes(loaded, inst, isProxiedHttp);
+            var isProxiedBudget = isSegRelayActive || (window.location.protocol === "https:" && isHttpOnlyStream(channel.url));
+            recordDownloadedBytes(loaded, inst, isProxiedBudget);
           }
         });
 

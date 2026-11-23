@@ -161,25 +161,18 @@ export default async function handler(req, res) {
     return res.status(403).json({ error: "Blocked host" });
   }
 
-  const allowHttp = req.query.allowHttp === "1" && target.protocol === "http:";
+  const allowHttp = req.query.allowHttp === "1";
+  const proxySeg = req.query.proxySeg === "1";
+  const canProxySegment = allowHttp || proxySeg;
   const lowerUrl = targetUrl.toLowerCase();
   const isMediaSegment = /\.(ts|m4s|mp4|aac|mp3|key)(\?|$)/i.test(lowerUrl);
 
-  // Segment proxying is the expensive / abusable path — allowlist it.
-  if (isMediaSegment && allowHttp) {
-    const allowed =
-      ALLOW_ANY_HTTP_SEGMENT ||
-      SEGMENT_ALLOWLIST.some((suffix) => hostMatchesSuffix(target.hostname, suffix));
-    if (!allowed) {
-      return res.status(403).json({
-        error: "Segment host not allowlisted",
-        hint: "Add the host to SEGMENT_ALLOWLIST in api/proxy.js",
-      });
-    }
+  if (target.protocol === "http:" && !allowHttp) {
+    return res.status(403).json({ error: "HTTP upstream requires allowHttp=1" });
   }
 
-  // For normal HTTPS streams, NEVER proxy video segments on Vercel.
-  if (isMediaSegment && !allowHttp) {
+  // Only proxy segments when explicitly requested (last-resort CORS fallback or HTTP mode)
+  if (isMediaSegment && !canProxySegment) {
     res.setHeader("Cache-Control", "public, max-age=60");
     return res.redirect(302, targetUrl);
   }
@@ -203,9 +196,9 @@ export default async function handler(req, res) {
 
     const contentType = (upstream.headers.get("content-type") || "").toLowerCase();
 
-    // Binary media segment or encryption key (only allowed when allowHttp)
+    // Binary media segment or encryption key (only allowed when canProxySegment)
     if (isMediaSegment) {
-      if (!allowHttp) {
+      if (!canProxySegment) {
         return res.redirect(302, targetUrl);
       }
       const buf = await readWithCap(upstream, MAX_SEGMENT_BYTES, controller.signal);
@@ -224,9 +217,7 @@ export default async function handler(req, res) {
       bodyText.trimStart().startsWith("#EXTM3U");
 
     if (!looksLikeM3u8) {
-      // Not a manifest (e.g. a key or other file). Don't proxy it unless
-      // this is an explicitly allowed HTTP stream.
-      if (!allowHttp) {
+      if (!canProxySegment) {
         return res.redirect(302, targetUrl);
       }
       const buf = Buffer.from(bodyText, "utf-8");
@@ -241,6 +232,7 @@ export default async function handler(req, res) {
     // M3U8 manifest text rewriting
     const finalUrl = upstream.url || targetUrl;
     const baseDir = finalUrl.substring(0, finalUrl.lastIndexOf("/") + 1);
+    const segParam = proxySeg ? "&proxySeg=1" : "";
 
     const rewritten = bodyText
       .split(/\r?\n/)
@@ -251,24 +243,28 @@ export default async function handler(req, res) {
         if (line.startsWith("#")) {
           return rawLine.replace(/URI="([^"]+)"/gi, (match, uri) => {
             const absUri = resolveUrl(uri, baseDir);
+            const isChildHttp = absUri.startsWith("http://");
             if (/\.m3u8(\?|$)/i.test(absUri)) {
-              const extra = allowHttp && absUri.startsWith("http://") ? "&allowHttp=1" : "";
-              return `URI="/api/proxy?mode=manifest${extra}&url=${encodeURIComponent(absUri)}"`;
+              const extra = isChildHttp ? "&allowHttp=1" : "";
+              return `URI="/api/proxy?mode=manifest${extra}${segParam}&url=${encodeURIComponent(absUri)}"`;
             }
-            if (allowHttp && absUri.startsWith("http://")) {
-              return `URI="/api/proxy?allowHttp=1&url=${encodeURIComponent(absUri)}"`;
+            if (isChildHttp || proxySeg) {
+              const extra = isChildHttp ? "&allowHttp=1" : "&proxySeg=1";
+              return `URI="/api/proxy?mode=segment${extra}&url=${encodeURIComponent(absUri)}"`;
             }
             return `URI="${absUri}"`;
           });
         }
 
         const absUrl = resolveUrl(line, baseDir);
+        const isChildHttp = absUrl.startsWith("http://");
         if (/\.m3u8(\?|$)/i.test(absUrl)) {
-          const extra = allowHttp && absUrl.startsWith("http://") ? "&allowHttp=1" : "";
-          return `/api/proxy?mode=manifest${extra}&url=${encodeURIComponent(absUrl)}`;
+          const extra = isChildHttp ? "&allowHttp=1" : "";
+          return `/api/proxy?mode=manifest${extra}${segParam}&url=${encodeURIComponent(absUrl)}`;
         }
-        if (allowHttp && absUrl.startsWith("http://")) {
-          return `/api/proxy?allowHttp=1&url=${encodeURIComponent(absUrl)}`;
+        if (isChildHttp || proxySeg) {
+          const extra = isChildHttp ? "&allowHttp=1" : "&proxySeg=1";
+          return `/api/proxy?mode=segment${extra}&url=${encodeURIComponent(absUrl)}`;
         }
         return absUrl;
       })
